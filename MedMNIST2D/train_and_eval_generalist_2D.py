@@ -3,70 +3,16 @@ import os
 import time
 from collections import OrderedDict
 from copy import deepcopy
-
 import medmnist
-import numpy as np
-import PIL
-import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.utils.data as data
+import torch
 from torch.utils.data import ConcatDataset, DataLoader
 import torchvision.transforms as transforms
-from medmnist import INFO, Evaluator
-from models import ResNet18, ResNet50
-from sklearn.metrics import roc_auc_score, accuracy_score
 from tensorboardX import SummaryWriter
-from torchvision.models import resnet18, resnet50
 from tqdm import trange
 
-class MultiTaskResNet18(nn.Module):
-    def __init__(self, num_classes_single, num_classes_multi):
-        super(MultiTaskResNet18, self).__init__()
-        # Load a pre-trained ResNet18 model
-        self.resnet_base = resnet18(pretrained=True)
-        
-        # Remove the original ResNet's final fully connected layer
-        self.resnet_base.fc = nn.Identity()
-        
-        # Add new final layers for each task
-        # For single-label classification
-        self.fc_single = nn.Linear(self.resnet_base.fc.in_features, num_classes_single)
-        
-        # For multi-label classification
-        self.fc_multi = nn.Linear(self.resnet_base.fc.in_features, num_classes_multi)
-    
-    def forward(self, x, task_type):
-        # Extract features using the base ResNet model
-        features = self.resnet_base(x)
-        
-        # Decide which task to perform based on the task_type argument
-        if task_type == "multi-label, binary-class":
-            return self.fc_single(features)
-        elif task_type == 'multi-class':
-            return self.fc_multi(features)
-
-# Custom wrapper to adjust target labels
-class TargetOffsetDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, offset=0):
-        self.dataset = dataset
-        self.offset = offset
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        data, target = self.dataset[idx]
-        adjusted_target = target + self.offset
-        return data, adjusted_target
-
-# Function to dynamically calculate the number of unique classes in a dataset
-def calculate_num_classes(dataset):
-    unique_classes = set()
-    for _, target in dataset:
-        unique_classes.add(target[0])
-    return len(unique_classes)
-
+# Import utilities from utils.py
+from utils import MultiTaskResNet18, TargetOffsetDataset, calculate_num_classes, getAUC, getACC
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run):
 
@@ -76,16 +22,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     datasets_2D = [
     ('pathmnist', 'PathMNIST'),
     #('chestmnist', 'ChestMNIST'),
-    ('dermamnist', 'DermaMNIST'),
-    ('octmnist', 'OCTMNIST'),
-    ('pneumoniamnist', 'PneumoniaMNIST'),
-    ('retinamnist', 'RetinaMNIST'),
-    ('breastmnist', 'BreastMNIST'),
-    ('bloodmnist', 'BloodMNIST'),
-    ('tissuemnist', 'TissueMNIST'),
-    ('organamnist', 'OrganAMNIST'),
-    ('organcmnist', 'OrganCMNIST'),
-    ('organsmnist', 'OrganSMNIST')
+    # ('dermamnist', 'DermaMNIST'),
+    # ('octmnist', 'OCTMNIST'),
+    # ('pneumoniamnist', 'PneumoniaMNIST'),
+    # ('retinamnist', 'RetinaMNIST'),
+    # ('breastmnist', 'BreastMNIST'),
+    # ('bloodmnist', 'BloodMNIST'),
+    # ('tissuemnist', 'TissueMNIST'),
+    # ('organamnist', 'OrganAMNIST'),
+    # ('organcmnist', 'OrganCMNIST'),
+    # ('organsmnist', 'OrganSMNIST')
     ]
     multi_label_datasets_2D = [
         ('chestmnist', 'ChestMNIST')]
@@ -151,14 +97,20 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     mt_val_loader = DataLoader(dataset=mt_val_dataset, batch_size=batch_size, shuffle=False)
     mt_test_loader = DataLoader(dataset=mt_test_dataset, batch_size=batch_size, shuffle=False)
 
-        #Load ChestMNIST dataset
+    #Load ChestMNIST dataset
     DataClass = getattr(medmnist, multi_label_datasets_2D[0][1])
-    ml_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb)
-    ml_train_loader = DataLoader(dataset=ml_dataset, batch_size=batch_size, shuffle=True)
+    ml_train_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb)
+    ml_test_dataset = DataClass(split='test', transform=data_transform, download=download, as_rgb=as_rgb)
+    ml_val_dataset = DataClass(split='val', transform=data_transform, download=download, as_rgb=as_rgb)
+    
+    ml_train_loader = DataLoader(dataset=ml_train_dataset, batch_size=batch_size, shuffle=True)
+    ml_train_loader_at_eval = DataLoader(dataset=ml_train_dataset, batch_size=batch_size, shuffle=False)
+    ml_val_loader = DataLoader(dataset=ml_val_dataset, batch_size=batch_size, shuffle=False)
+    ml_test_loader = DataLoader(dataset=ml_test_dataset, batch_size=batch_size, shuffle=False)
+    
     n_classes_ml = 14
     
     print('==> Building and training model...')
-    
     
     model = MultiTaskResNet18(n_classes_mt, n_classes_ml)
 
@@ -269,7 +221,9 @@ def train(model, train_loader, task, criterion, optimizer, device, writer):
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         optimizer.zero_grad()
-        outputs = model(inputs.to(device))
+        # Forward pass
+        inputs = inputs.to(device)
+        outputs = model(inputs,task)
 
         if task == 'multi-label, binary-class':
             targets = targets.to(torch.float32).to(device)
@@ -293,51 +247,35 @@ def test(model, data_loader, task, criterion, device, run, save_folder=None):
     model.eval()
     
     total_loss = []
-    all_targets = []
-    all_predictions = []
+    y_score = torch.tensor([]).to(device)
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(data_loader):
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-
-            if len(targets) == 14:
-                targets = targets.to(torch.float32)
+            inputs = inputs.to(device)
+            outputs = model(inputs,task)
+            
+            if task == 'multi-label, binary-class':
+                targets = targets.to(torch.float32).to(device)
                 loss = criterion(outputs, targets)
                 m = nn.Sigmoid()
-                outputs = m(outputs)
+                outputs = m(outputs).to(device)
             else:
-                targets = torch.squeeze(targets, 1).long()
+                targets = torch.squeeze(targets, 1).long().to(device)
                 loss = criterion(outputs, targets)
                 m = nn.Softmax(dim=1)
-                outputs = m(outputs)
+                outputs = m(outputs).to(device)
+                targets = targets.float().resize_(len(targets), 1)
 
             total_loss.append(loss.item())
-            all_targets.extend(targets.cpu().numpy())
-            all_predictions.extend(outputs.cpu().numpy())
+            y_score = torch.cat((y_score, outputs), 0)
 
-    # Convert lists to Numpy arrays
-    all_targets = np.array(all_targets)
-    all_predictions = np.array(all_predictions)
+        y_score = y_score.detach().cpu().numpy()
+        auc = getAUC(targets, y_score, task)
+        acc = getACC(targets, y_score, task)
+        
+        test_loss = sum(total_loss) / len(total_loss)
 
-    # Calculate AUC and ACC
-    if task == 'multi-label, binary-class' or task == 'binary-class':
-        # For binary classification and multi-label (consider each label separately)
-        try:
-            auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr')
-        except ValueError:
-            # Handle cases where only one class is present in `y_true` or other issues
-            auc = float('nan')
-    else:
-        # Assuming multi-class classification
-        # Convert predictions to class values
-        predictions_class = np.argmax(all_predictions, axis=1)
-        auc = roc_auc_score(all_targets, all_predictions, multi_class='ovr')
-        acc = accuracy_score(all_targets, predictions_class)
-
-    test_loss = np.mean(total_loss)
-
-    return [test_loss, auc, acc]
+        return [test_loss, auc, acc]
 
 
 if __name__ == '__main__':
