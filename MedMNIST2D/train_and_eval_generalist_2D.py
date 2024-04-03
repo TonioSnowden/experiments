@@ -4,6 +4,7 @@ import time
 from collections import OrderedDict
 from copy import deepcopy
 import medmnist
+import numpy as np
 import torch.nn as nn
 import torch
 from torch.utils.data import ConcatDataset, DataLoader
@@ -22,16 +23,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     datasets_2D = [
     ('pathmnist', 'PathMNIST'),
     #('chestmnist', 'ChestMNIST'),
-    # ('dermamnist', 'DermaMNIST'),
-    # ('octmnist', 'OCTMNIST'),
-    # ('pneumoniamnist', 'PneumoniaMNIST'),
-    # ('retinamnist', 'RetinaMNIST'),
-    # ('breastmnist', 'BreastMNIST'),
-    # ('bloodmnist', 'BloodMNIST'),
-    # ('tissuemnist', 'TissueMNIST'),
-    # ('organamnist', 'OrganAMNIST'),
-    # ('organcmnist', 'OrganCMNIST'),
-    # ('organsmnist', 'OrganSMNIST')
+     ('dermamnist', 'DermaMNIST'),
+     ('octmnist', 'OCTMNIST'),
+     ('pneumoniamnist', 'PneumoniaMNIST'),
+     ('retinamnist', 'RetinaMNIST'),
+     ('breastmnist', 'BreastMNIST'),
+     ('bloodmnist', 'BloodMNIST'),
+     ('tissuemnist', 'TissueMNIST'),
+     ('organamnist', 'OrganAMNIST'),
+     ('organcmnist', 'OrganCMNIST'),
+     ('organsmnist', 'OrganSMNIST')
     ]
     multi_label_datasets_2D = [
         ('chestmnist', 'ChestMNIST')]
@@ -82,20 +83,19 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
         offset += num_classes
 
-    mt_train_dataset = ConcatDataset(concat_train_datasets)
-    mt_val_dataset = ConcatDataset(concat_val_datasets)
-    mt_test_dataset = ConcatDataset(concat_test_datasets)
-        
+    mc_train_dataset = ConcatDataset(concat_train_datasets)
+    mc_val_dataset = ConcatDataset(concat_val_datasets)
+    mc_test_dataset = ConcatDataset(concat_test_datasets)
         
     task = "multi-class"
     n_channels = 3
-    n_classes_mt = calculate_num_classes(mt_train_dataset)
+    n_classes_mt = calculate_num_classes(mc_train_dataset)
     
     # DataLoader setup
-    mt_train_loader = DataLoader(dataset=mt_train_dataset, batch_size=batch_size, shuffle=True)
-    mt_train_loader_at_eval = DataLoader(dataset=mt_train_dataset, batch_size=batch_size,shuffle=False)
-    mt_val_loader = DataLoader(dataset=mt_val_dataset, batch_size=batch_size, shuffle=False)
-    mt_test_loader = DataLoader(dataset=mt_test_dataset, batch_size=batch_size, shuffle=False)
+    mc_train_loader = DataLoader(dataset=mc_train_dataset, batch_size=batch_size, shuffle=True)
+    mc_train_loader_at_eval = DataLoader(dataset=mc_train_dataset, batch_size=batch_size,shuffle=False)
+    mc_val_loader = DataLoader(dataset=mc_val_dataset, batch_size=batch_size, shuffle=False)
+    mc_test_loader = DataLoader(dataset=mc_test_dataset, batch_size=batch_size, shuffle=False)
 
     #Load ChestMNIST dataset
     DataClass = getattr(medmnist, multi_label_datasets_2D[0][1])
@@ -117,17 +117,27 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     model = model.to(device)
 
     ml_criterion = nn.BCEWithLogitsLoss()
-    mt_criterion = nn.CrossEntropyLoss()
+    mc_criterion = nn.CrossEntropyLoss()
 
     if model_path is not None:
         model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
-        train_metrics = test(model, mt_train_loader_at_eval, task, mt_criterion, device, run, output_root)
-        val_metrics = test(model, mt_val_loader, task, mt_criterion, device, run, output_root)
-        test_metrics = test(model, mt_test_loader, task, mt_criterion, device, run, output_root)
+        mc_train_metrics = test(model, mc_train_loader_at_eval, task, mc_criterion, device, run, output_root)
+        mc_val_metrics = test(model, mc_val_loader, task, mc_criterion, device, run, output_root)
+        mc_test_metrics = test(model, mc_test_loader, task, mc_criterion, device, run, output_root)
+        
+        ml_train_metrics = test(model, ml_train_loader, task, ml_criterion, device, run, output_root)
+        ml_val_metrics = test(model, ml_val_loader, task, ml_criterion, device, run, output_root)
+        ml_test_metrics = test(model, ml_test_loader, task, ml_criterion, device, run, output_root)
 
-        print('train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2]) + \
-              'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2]) + \
-              'test  auc: %.5f  acc: %.5f\n' % (test_metrics[1], test_metrics[2]))
+        print('Multi class')
+        print('train  auc: %.5f  acc: %.5f\n' % (mc_train_metrics[1], mc_train_metrics[2]) + \
+              'val  auc: %.5f  acc: %.5f\n' % (mc_val_metrics[1], mc_val_metrics[2]) + \
+              'test  auc: %.5f  acc: %.5f\n' % (mc_test_metrics[1], mc_test_metrics[2]))
+        
+        print('Multi label')
+        print('train  auc: %.5f  acc: %.5f\n' % (ml_train_metrics[1], ml_train_metrics[2]) + \
+              'val  auc: %.5f  acc: %.5f\n' % (ml_val_metrics[1], ml_val_metrics[2]) + \
+              'test  auc: %.5f  acc: %.5f\n' % (ml_test_metrics[1], ml_test_metrics[2]))
 
     if num_epochs == 0:
         return
@@ -143,43 +153,64 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     
     writer = SummaryWriter(log_dir=os.path.join(output_root, 'Tensorboard_Results'))
 
-    best_auc = 0
+    best_auc = 0  
     best_epoch = 0
-    best_model = deepcopy(model)
-
+    best_model = None
+    
     global iteration
     iteration = 0
-    
-    for epoch in trange(num_epochs):        
-        trainings = [('multi-class', "mt_"), ("multi-label, binary-class", "ml_")]
-        
+
+    for epoch in trange(num_epochs):
+        log_dict = {}  
+
+        task_weightings = {'multi-class': 0.8, 'multi-label, binary-class': 0.2}
+        weighted_train_metrics = []
+        weighted_val_metrics = []
+        weighted_test_metrics = []
+
+        trainings = [('multi-class', "mc_"), ("multi-label, binary-class", "ml_")]
+
         for task, prefix in trainings:
-            #use prefix for dataset train_loader
+            # Use prefix for dataset train_loader
             train_loss = train(model, eval(prefix + 'train_loader'), task, eval(prefix + 'criterion'), optimizer, device, writer)
-            
+
+            # Calculate metrics for each dataset
             train_metrics = test(model, eval(prefix + 'train_loader_at_eval'), task, eval(prefix + 'criterion'), device, run)
             val_metrics = test(model, eval(prefix + 'val_loader'), task, eval(prefix + 'criterion'), device, run)
             test_metrics = test(model, eval(prefix + 'test_loader'), task, eval(prefix + 'criterion'), device, run)
-        
-            scheduler.step()
             
-            for i, key in enumerate(train_logs):
-                log_dict[key] = train_metrics[i]
-            for i, key in enumerate(val_logs):
-                log_dict[key] = val_metrics[i]
-            for i, key in enumerate(test_logs):
-                log_dict[key] = test_metrics[i]
+            # Weight metrics based on task
+            weight = task_weightings[task]
+            weighted_train_metrics.append([m * weight for m in train_metrics])
+            weighted_val_metrics.append([m * weight for m in val_metrics])
+            weighted_test_metrics.append([m * weight for m in test_metrics])
 
-            for key, value in log_dict.items():
-                writer.add_scalar(key, value, epoch)
-                
-            cur_auc = val_metrics[1]
-            if cur_auc > best_auc:
-                best_epoch = epoch
-                best_auc = cur_auc
-                best_model = deepcopy(model)
-                print('cur_best_auc:', best_auc)
-                print('cur_best_epoch', best_epoch)
+            scheduler.step()
+
+        # Aggregate weighted metrics
+        avg_train_metrics = [sum(metrics) for metrics in zip(*weighted_train_metrics)]
+        avg_val_metrics = [sum(metrics) for metrics in zip(*weighted_val_metrics)]
+        avg_test_metrics = [sum(metrics) for metrics in zip(*weighted_test_metrics)]
+
+        # Log aggregated metrics
+        for i, key in enumerate(train_logs):
+            log_dict[key] = avg_train_metrics[i]
+        for i, key in enumerate(val_logs):
+            log_dict[key] = avg_val_metrics[i]
+        for i, key in enumerate(test_logs):
+            log_dict[key] = avg_test_metrics[i]
+
+        for key, value in log_dict.items():
+            writer.add_scalar(key, value, epoch)
+
+        # Example for AUC - adjust based on your actual metric indices
+        cur_auc = avg_val_metrics[1]  # Assuming the second metric is AUC
+        if cur_auc > best_auc:
+            best_epoch = epoch
+            best_auc = cur_auc
+            best_model = deepcopy(model)
+            print('cur_best_auc:', best_auc)
+            print('cur_best_epoch', best_epoch)
 
     state = {
         'net': best_model.state_dict(),
@@ -188,22 +219,24 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
     path = os.path.join(output_root, 'best_model.pth')
     torch.save(state, path)
 
-    mt_train_metrics = test(best_model, mt_train_loader_at_eval, task, mt_criterion, device, run, output_root)
-    mt_val_metrics = test(best_model, mt_val_loader, task, mt_criterion, device, run, output_root)
-    mt_test_metrics = test(best_model, mt_test_loader, task, mt_criterion, device, run, output_root)
+    task = 'multi-class'
+    mc_train_metrics = test(best_model, mc_train_loader_at_eval, task, mc_criterion, device, run, output_root)
+    mc_val_metrics = test(best_model, mc_val_loader, task, mc_criterion, device, run, output_root)
+    mc_test_metrics = test(best_model, mc_test_loader, task, mc_criterion, device, run, output_root)
 
+    task = "multi-label, binary-class"
     ml_train_metrics = test(best_model, ml_train_loader, task, ml_criterion, device, run, output_root)
     ml_val_metrics = test(best_model, ml_train_loader, task, ml_criterion, device, run, output_root)
     ml_test_metrics = test(best_model, ml_train_loader, task, ml_criterion, device, run, output_root)
 
-    train_log = 'mt train  auc: %.5f  acc: %.5f\n' % (mt_train_metrics[1], mt_train_metrics[2])
+    train_log = 'mt train  auc: %.5f  acc: %.5f\n' % (mc_train_metrics[1], mc_train_metrics[2])
     ml_train_log = 'ml train  auc: %.5f  acc: %.5f\n' % (ml_train_metrics[1], ml_train_metrics[2])
     ml_train_log = 'ml train  auc: %.5f  acc: %.5f\n' % (ml_train_metrics[1], ml_train_metrics[2])
     ml_val_log = 'ml val  auc: %.5f  acc: %.5f\n' % (ml_val_metrics[1], ml_val_metrics[2])
     ml_test_log = 'ml test  auc: %.5f  acc: %.5f\n' % (ml_test_metrics[1], ml_test_metrics[2])
     
-    val_log = 'val  auc: %.5f  acc: %.5f\n' % (mt_val_metrics[1], mt_val_metrics[2])
-    test_log = 'test  auc: %.5f  acc: %.5f\n' % (mt_test_metrics[1], mt_test_metrics[2])
+    val_log = 'val  auc: %.5f  acc: %.5f\n' % (mc_val_metrics[1], mc_val_metrics[2])
+    test_log = 'test  auc: %.5f  acc: %.5f\n' % (mc_test_metrics[1], mc_test_metrics[2])
 
     log = '%s\n' % (data_flag) + train_log + ml_train_log + ml_val_log + ml_test_log + val_log + test_log
     print(log)
@@ -221,7 +254,6 @@ def train(model, train_loader, task, criterion, optimizer, device, writer):
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         optimizer.zero_grad()
-        # Forward pass
         inputs = inputs.to(device)
         outputs = model(inputs,task)
 
@@ -248,6 +280,7 @@ def test(model, data_loader, task, criterion, device, run, save_folder=None):
     
     total_loss = []
     y_score = torch.tensor([]).to(device)
+    y_true = torch.tensor([]).to(device)
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(data_loader):
@@ -268,10 +301,13 @@ def test(model, data_loader, task, criterion, device, run, save_folder=None):
 
             total_loss.append(loss.item())
             y_score = torch.cat((y_score, outputs), 0)
-
+            y_true = torch.cat((y_true, targets), 0)
+        
+        y_true = y_true.detach().cpu().numpy()
         y_score = y_score.detach().cpu().numpy()
-        auc = getAUC(targets, y_score, task)
-        acc = getACC(targets, y_score, task)
+        
+        auc = getAUC(y_true, y_score, task)
+        acc = getACC(y_true, y_score, task)
         
         test_loss = sum(total_loss) / len(total_loss)
 
@@ -290,7 +326,7 @@ if __name__ == '__main__':
                         help='output root, where to save models and results',
                         type=str)
     parser.add_argument('--num_epochs',
-                        default=3,
+                        default=10,
                         help='num of epochs of training, the script would only test model if set num_epochs to 0',
                         type=int)
     parser.add_argument('--gpu_ids',

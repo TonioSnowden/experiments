@@ -1,37 +1,29 @@
 import torch
 import torch.nn as nn
 from torchvision.models import resnet18
-from torch.utils.data import Dataset
 from sklearn.metrics import roc_auc_score, accuracy_score
 import numpy as np
-
+import torch.nn.functional as F
 
 class MultiTaskResNet18(nn.Module):
-    def __init__(self, num_classes_single, num_classes_multi):
+    def __init__(self, n_classes_mt, n_classes_ml):
         super(MultiTaskResNet18, self).__init__()
-        # Initialize a ResNet18 model without pre-trained weights
         self.resnet_base = resnet18(weights=None)
         
-        # Capture the number of input features to the final fully connected layer
         in_features = self.resnet_base.fc.in_features
         
-        # Replace the original ResNet's final fully connected layer with Identity
-        # This is now done after capturing in_features
         self.resnet_base.fc = nn.Identity()
         
-        # Define new final layers for each task
-        self.fc_single = nn.Linear(in_features, num_classes_single)  # For single-label classification
-        self.fc_multi = nn.Linear(in_features, num_classes_multi) 
+        self.fc_single = nn.Linear(in_features, n_classes_mt) 
+        self.fc_multi = nn.Linear(in_features, n_classes_ml) 
     
     def forward(self, x, task_type):
-        # Extract features using the base ResNet model
         features = self.resnet_base(x)
         
-        # Decide which task to perform based on the task_type argument
         if task_type == "multi-label, binary-class":
-            return self.fc_single(features)
-        elif task_type == 'multi-class':
             return self.fc_multi(features)
+        elif task_type == 'multi-class':
+            return self.fc_single(features)
 
 # Custom wrapper to adjust target labels
 class TargetOffsetDataset(torch.utils.data.Dataset):
@@ -46,6 +38,53 @@ class TargetOffsetDataset(torch.utils.data.Dataset):
         data, target = self.dataset[idx]
         adjusted_target = target + self.offset
         return data, adjusted_target
+    
+class TextTargetDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, label_dict, text_label, task, tokenizer):
+        self.dataset = dataset
+        self.label_dict = label_dict
+        self.text_label = text_label
+        self.task = task
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data, target = self.dataset[idx]
+
+        if self.task == 'multi-label, binary-class':
+            target_text = self.text_label + " with " + self.label_dict[str(target.item())]
+        elif self.task == "multi-class":
+            labels = [self.label_dict[str(i)] for i, label_present in enumerate(target) if label_present == 1]
+            if len(labels) == 0:
+                target_text = self.text_label + " with no issue to classify"
+            else:
+                target_text = self.text_label + " with " + ", ".join(labels)
+
+        text_inputs = self.tokenizer(text=target_text, return_tensors="pt", padding='max_length', truncation=True, max_length=32)
+        
+        input_ids = text_inputs["input_ids"].squeeze(0)
+        attention_mask = text_inputs["attention_mask"].squeeze(0)
+        
+        return data, input_ids, attention_mask    
+    
+def info_nce_loss(image_features, text_features, temperature=0.07):
+    """
+    Calculates the InfoNCE loss between image and text features.
+    """
+    image_features = F.normalize(image_features, p=2, dim=1)
+    text_features = F.normalize(text_features, p=2, dim=1)
+
+    similarity_matrix = torch.mm(image_features, text_features.t()) / temperature
+    labels = torch.arange(similarity_matrix.size(0)).to(similarity_matrix.device)
+
+    loss_i = F.cross_entropy(similarity_matrix, labels)
+    loss_t = F.cross_entropy(similarity_matrix.t(), labels)
+
+    loss = (loss_i + loss_t) / 2
+    return loss
+
 
 # Function to dynamically calculate the number of unique classes in a dataset
 def calculate_num_classes(dataset):
@@ -61,30 +100,10 @@ def getAUC(y_true, y_score, task):
     shape: (n_samples, n_labels) or (n_samples, n_classes) or (n_samples,) if n_labels==1 or n_classes==1
     :param task: the task of current dataset
     """
-    y_true = y_true.squeeze()
-    y_score = y_score.squeeze()
-
-    if task == "multi-label, binary-class":
-        auc = 0
-        for i in range(y_score.shape[1]):
-            label_auc = roc_auc_score(y_true[:, i], y_score[:, i])
-            auc += label_auc
-        ret = auc / y_score.shape[1]
-    elif task == "binary-class":
-        if y_score.ndim == 2:
-            y_score = y_score[:, -1]
-        else:
-            assert y_score.ndim == 1
-        ret = roc_auc_score(y_true, y_score)
-    else:
-        auc = 0
-        for i in range(y_score.shape[1]):
-            y_true_binary = (y_true == i).astype(float)
-            y_score_binary = y_score[:, i]
-            auc += roc_auc_score(y_true_binary, y_score_binary)
-        ret = auc / y_score.shape[1]
-
-    return ret
+    if task == 'multi-label, binary-class':
+        return roc_auc_score(y_true, y_score)
+    elif task == 'multi-class':
+        return roc_auc_score(y_true, y_score, multi_class='ovr')
 
 
 def getACC(y_true, y_score, task, threshold=0.5):
